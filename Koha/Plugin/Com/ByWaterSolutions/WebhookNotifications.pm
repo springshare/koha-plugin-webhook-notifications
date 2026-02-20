@@ -1029,12 +1029,11 @@ sub get_decrypted_syspref {
     my ($self, $preference_name) = @_;
 
     my $syspref = C4::Context->preference($preference_name);
-    my $decrypted_json = $self->decrypt_credentials($syspref);
-    my $decrypted = decode_json( $decrypted_json );
-
-    return $decrypted;
-
+    if ( $syspref ) {
+        return $self->decrypt_credentials($syspref);
+    }
 }
+
 =head3 set_encrypted_syspref
 
 Encrypts and stores OAuth2 credentials as a system preference.
