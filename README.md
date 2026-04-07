@@ -84,6 +84,31 @@ Sends only identifiers, useful when the receiving service will fetch details its
 
 To send a message via webhook instead of having Koha process and send the notice locally, the message content must be a YAML blob of key/value pairs. The only required key is `webhook: yes`.
 
+### Digest notices (`----`) and multiple YAML stanzas
+
+[Koha digest notices](https://manual.koha-community.org/) queue a single message and **append** content until `process_message_queue.pl` runs. Repeating parts of the letter often use Koha’s **`----` block** rules (a line of four or more dashes separating sections).
+
+**How the plugin parses content**
+
+1. If the **entire** message body is valid YAML (including [multi-document YAML](http://yaml.org/spec/1.2/spec.html#id28023445) with multiple `---` documents), it is loaded as usual.
+2. If the body contains lines of **four or more dashes** on their own (digest-style boundaries), the plugin splits on those lines and runs the YAML loader on **each segment**. Valid YAML mappings are collected from the segments (plain prose or HTML outside YAML is ignored).
+3. Every mapping with `webhook: yes` is **merged** into one logical request: `checkout` / `checkouts`, `hold` / `holds`, `old_checkout`, and `old_hold` identifiers are combined (comma-separated values are trimmed and de-duplicated). **`patron`**, **`library`**, **`item`**, **`biblio`**, and **`biblioitem`** are taken from the first stanza that sets them. The plugin then sends **one** OAuth POST and marks the message **sent** once on success.
+
+**Recommended template shape for digests**
+
+Prefer **one** YAML mapping with a **comma-separated list** of issue or hold IDs so the accumulated body stays easy to read and machine-parseable:
+
+```yaml
+---
+webhook: yes
+checkouts: [% FOREACH c IN checkouts %][% c.issue_id %],[% END %]
+---
+```
+
+Do **not** repeat `checkout:` twice in the same mapping (duplicate keys are invalid YAML); use `checkouts` with multiple IDs instead. The same idea applies to `holds` for multi-hold digests.
+
+After merge, `old_checkout` and `old_hold` may be passed as comma-separated IDs when several digest stanzas are merged.
+
 ### Available Keys
 
 | Key | Description |

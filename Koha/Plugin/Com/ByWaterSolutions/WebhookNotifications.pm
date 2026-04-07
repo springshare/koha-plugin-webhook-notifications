@@ -330,6 +330,97 @@ sub send_to_webhook {
     };
 }
 
+=head3 load_yaml_documents_from_message_content
+
+Parses YAML from message C<content>. Koha digest notices wrap repeating blocks
+in lines of four or more dashes (C<---->); the full body is often not valid
+YAML as a single document, so when those delimiters are present we load each
+segment separately. Otherwise we load the entire string (multi-document YAML is
+supported).
+
+=cut
+
+sub load_yaml_documents_from_message_content {
+    my ( $self, $content ) = @_;
+    return () unless defined $content && length $content;
+
+    my @docs;
+    if ( $content =~ /\R-{4,}\R/ ) {
+        for my $seg ( split( /\R-{4,}\R/, $content ) ) {
+            $seg =~ s/\A\s+|\s+\z//g;
+            next unless length $seg;
+            eval {
+                my @loaded = Load($seg);
+                push @docs, grep { defined && ref $_ eq 'HASH' } @loaded;
+            };
+        }
+    }
+    if ( !@docs ) {
+        eval {
+            my @loaded = Load($content);
+            push @docs, grep { defined && ref $_ eq 'HASH' } @loaded;
+        };
+    }
+    return @docs;
+}
+
+=head3 merge_webhook_yaml_documents
+
+When digest or multi-document YAML yields several mappings with C<webhook: yes>,
+merge them into one mapping so checkout/hold identifiers are combined and only
+one webhook POST is sent per message.
+
+=cut
+
+sub merge_webhook_yaml_documents {
+    my ( $self, @docs ) = @_;
+    my @wh = grep { ( $_->{webhook} // '' ) eq 'yes' } @docs;
+    return undef unless @wh;
+
+    return $wh[0] if @wh == 1;
+
+    my %m = ( webhook => 'yes' );
+    my ( @c_ids, @h_ids, @oc_ids, @oh_ids );
+
+    for my $y (@wh) {
+        push @c_ids,  _split_trim_ids( $y->{checkouts} )    if $y->{checkouts};
+        push @c_ids,  _split_trim_ids( $y->{checkout} )      if $y->{checkout};
+        push @h_ids,  _split_trim_ids( $y->{holds} )        if $y->{holds};
+        push @h_ids,  _split_trim_ids( $y->{hold} )         if $y->{hold};
+        push @oc_ids, _split_trim_ids( $y->{old_checkout} ) if $y->{old_checkout};
+        push @oh_ids, _split_trim_ids( $y->{old_hold} )     if $y->{old_hold};
+
+        $m{patron}     //= $y->{patron};
+        $m{library}    //= $y->{library};
+        $m{item}       //= $y->{item};
+        $m{biblio}     //= $y->{biblio};
+        $m{biblioitem} //= $y->{biblioitem};
+    }
+
+    @c_ids  = _uniq_preserving_order(@c_ids);
+    @h_ids  = _uniq_preserving_order(@h_ids);
+    @oc_ids = _uniq_preserving_order(@oc_ids);
+    @oh_ids = _uniq_preserving_order(@oh_ids);
+
+    $m{checkouts}    = join( ',', @c_ids )  if @c_ids;
+    $m{holds}        = join( ',', @h_ids )  if @h_ids;
+    $m{old_checkout} = join( ',', @oc_ids ) if @oc_ids;
+    $m{old_hold}     = join( ',', @oh_ids ) if @oh_ids;
+
+    return \%m;
+}
+
+sub _split_trim_ids {
+    my ($s) = @_;
+    return () unless defined $s && length $s;
+    return map { s/\A\s+|\s+\z//gr } grep { length } split /,/, $s;
+}
+
+sub _uniq_preserving_order {
+    my %seen;
+    return grep { !$seen{$_}++ } @_;
+}
+
 =head3 before_send_messages
 
 Plugin hook that runs right before the message queue is processed
@@ -495,22 +586,15 @@ sub before_send_messages {
 
                 my $patron;
 
-                my @yaml;
+                my @yaml_docs = $self->load_yaml_documents_from_message_content($content);
+                my $yaml      = $self->merge_webhook_yaml_documents(@yaml_docs);
+
+                unless ($yaml) {
+                    INFO("MESSAGE ${\($m->id)} skipped - no webhook: yes YAML in content");
+                    next;
+                }
+
                 try {
-                    @yaml = Load $content;
-                } catch {
-                    $is_cronjob && say "WEBHOOK - LOADING YAML FAILED!:\n" . $m->content;
-                    ERROR("WEBHOOK - LOADING YAML FAILED!:" . Data::Dumper::Dumper($m->content));
-                    @yaml = undef;
-                };
-
-                foreach my $yaml (@yaml) {
-                    try {
-
-                        next unless $yaml;
-                        next unless ref $yaml eq 'HASH';
-                        next unless $yaml->{webhook};
-                        next unless $yaml->{webhook} eq 'yes';
 
                         $messages_seen->{$m->message_id} = 1;
 
@@ -525,33 +609,53 @@ sub before_send_messages {
                             $is_cronjob && say "WEBHOOK - Fetching patron failed - $_";
                         };
 
-                        ## Handle 'checkout' / 'old_checkout'
-                        my $checkout;
+                        ## Handle 'checkout' (single active checkout id)
                         if ($yaml->{checkout}) {
-                            $checkout = Koha::Checkouts->find($yaml->{checkout});
+                            my $checkout = Koha::Checkouts->find($yaml->{checkout});
+                            if ($checkout) {
+                                $patron          //= $checkout->patron;
+                                $data->{patron}  = $self->scrub_patron($patron->unblessed);
+                                $data->{library} = $checkout->library->unblessed;
+
+                                my $subdata;
+                                my $item = $checkout->item;
+                                $subdata->{checkout}   = $checkout->unblessed;
+                                $subdata->{item}       = $item->unblessed;
+                                $subdata->{biblio}     = $self->scrub_biblio($item->biblio->unblessed);
+                                $subdata->{biblioitem} = $item->biblioitem->unblessed;
+                                $subdata->{itemtype}   = $item->itemtype->unblessed;
+
+                                $data->{checkouts} //= [];
+                                push @{$data->{checkouts}}, $subdata;
+                            }
                         }
+
+                        ## Handle 'old_checkout' (comma-separated when merged from digest)
                         if ($yaml->{old_checkout}) {
-                            $checkout = Koha::Old::Checkouts->find($yaml->{old_checkout});
-                        }
-                        if ($checkout) {
-                            $patron          //= $checkout->patron;
-                            $data->{patron}  = $self->scrub_patron($patron->unblessed);
-                            $data->{library} = $checkout->library->unblessed;
+                            for my $oid ( _split_trim_ids( $yaml->{old_checkout} ) ) {
+                                my $checkout = Koha::Old::Checkouts->find($oid);
+                                next unless $checkout;
 
-                            my $subdata;
-                            my $item = $checkout->item;
-                            $subdata->{checkout}   = $checkout->unblessed;
-                            $subdata->{item}       = $item->unblessed;
-                            $subdata->{biblio}     = $self->scrub_biblio($item->biblio->unblessed);
-                            $subdata->{biblioitem} = $item->biblioitem->unblessed;
-                            $subdata->{itemtype}   = $item->itemtype->unblessed;
+                                $patron          //= $checkout->patron;
+                                $data->{patron}  = $self->scrub_patron($patron->unblessed);
+                                $data->{library} = $checkout->library->unblessed;
 
-                            $data->{checkouts} = [$subdata];
+                                my $subdata;
+                                my $item = $checkout->item;
+                                $subdata->{checkout}   = $checkout->unblessed;
+                                $subdata->{item}       = $item->unblessed;
+                                $subdata->{biblio}     = $self->scrub_biblio($item->biblio->unblessed);
+                                $subdata->{biblioitem} = $item->biblioitem->unblessed;
+                                $subdata->{itemtype}   = $item->itemtype->unblessed;
+
+                                $data->{checkouts} //= [];
+                                push @{$data->{checkouts}}, $subdata;
+                            }
                         }
 
                         ## Handle 'checkouts'
                         if ($yaml->{checkouts}) {
-                            my @checkouts = split(/,/, $yaml->{checkouts});
+                            my @checkouts = _split_trim_ids( $yaml->{checkouts} );
 
                             foreach my $id (@checkouts) {
                                 my $checkout = Koha::Checkouts->find($id);
@@ -599,40 +703,44 @@ sub before_send_messages {
                                 $subdata->{itemtype} = $item->itemtype->unblessed;
                             }
 
-                            $data->{holds} = [$subdata];
+                            $data->{holds} //= [];
+                            push @{$data->{holds}}, $subdata;
                         }
 
-                        ## Handle 'old_hold'
+                        ## Handle 'old_hold' (comma-separated when merged from digest)
                         if ($yaml->{old_hold}) {
-                            my $hold = Koha::Old::Holds->find($yaml->{old_hold});
-                            $m->update({status => 'failed', failure_code => "Hold with id $yaml->{old_hold} not found"}) && next unless $hold;
+                            for my $hid ( _split_trim_ids( $yaml->{old_hold} ) ) {
+                                my $hold = Koha::Old::Holds->find($hid);
+                                $m->update({status => 'failed', failure_code => "Hold with id $hid not found"}) && next unless $hold;
 
-                            my $biblio = Koha::Biblios->find($hold->biblionumber);
-                            $m->update({status => 'failed', failure_code => "Bib for old hold with id $yaml->{old_hold} not found"}) && next unless $biblio;
+                                my $biblio = Koha::Biblios->find($hold->biblionumber);
+                                $m->update({status => 'failed', failure_code => "Bib for old hold with id $hid not found"}) && next unless $biblio;
 
-                            my $biblioitem = $biblio->biblioitem;
-                            $m->update({status => 'failed', failure_code => "Bib for old hold with id $yaml->{old_hold} not found"}) && next unless $biblioitem;
+                                my $biblioitem = $biblio->biblioitem;
+                                $m->update({status => 'failed', failure_code => "Bib for old hold with id $hid not found"}) && next unless $biblioitem;
 
-                            $patron //= $hold->patron;
-                            $data->{patron} //= $self->scrub_patron($patron->unblessed);
+                                $patron //= $hold->patron;
+                                $data->{patron} //= $self->scrub_patron($patron->unblessed);
 
-                            my $subdata;
-                            $subdata->{holds}          = [$hold->unblessed];
-                            $subdata->{pickup_library} = Koha::Libraries->find($hold->branchcode);
-                            $subdata->{biblio}         = $self->scrub_biblio($biblio->unblessed);
-                            $subdata->{biblioitem}     = $biblioitem->unblessed;
+                                my $subdata;
+                                $subdata->{holds}          = [$hold->unblessed];
+                                $subdata->{pickup_library} = Koha::Libraries->find($hold->branchcode);
+                                $subdata->{biblio}         = $self->scrub_biblio($biblio->unblessed);
+                                $subdata->{biblioitem}     = $biblioitem->unblessed;
 
-                            if (my $item = $hold->item) {
-                                $subdata->{item}     = $item->unblessed;
-                                $subdata->{itemtype} = $item->itemtype->unblessed;
+                                if (my $item = $hold->item) {
+                                    $subdata->{item}     = $item->unblessed;
+                                    $subdata->{itemtype} = $item->itemtype->unblessed;
+                                }
+
+                                $data->{holds} //= [];
+                                push @{$data->{holds}}, $subdata;
                             }
-
-                            $data->{holds} = [$subdata];
                         }
 
                         ## Handle 'holds'
                         if ($yaml->{holds}) {
-                            my @holds = split(/,/, $yaml->{holds});
+                            my @holds = _split_trim_ids( $yaml->{holds} );
 
                             foreach my $id (@holds) {
                                 my $hold = Koha::Holds->find($id);
@@ -756,7 +864,6 @@ sub before_send_messages {
                         $info->{results}->{sent}->{failed}++;
                         $results->{failed}++;
                     };
-                }
             } catch {
                 $is_cronjob && say "WEBHOOK - ERROR - Processing Message ${\( $m->id )} Failed - $_";
                 ERROR("Processing Message ${\( $m->id )} Failed - $_");
