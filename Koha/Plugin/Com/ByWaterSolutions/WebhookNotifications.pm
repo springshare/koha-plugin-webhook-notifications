@@ -491,13 +491,14 @@ sub before_send_messages {
                 INFO("WORKING ON MESSAGE " . $m->id);
                 $is_cronjob && say "WEBHOOK - CONTENT:\n" . $m->content if $verbose > 2;
                 TRACE("MESSAGE CONTENTS: " . Data::Dumper::Dumper($m->unblessed));
-                my $content = $m->content();
+                my $content   = $m->content();
+                my $yaml_text = _normalize_yaml_flat_id_list_blocks($content);
 
                 my $patron;
 
                 my @yaml;
                 try {
-                    @yaml = Load $content;
+                    @yaml = Load $yaml_text;
                 } catch {
                     $is_cronjob && say "WEBHOOK - LOADING YAML FAILED!:\n" . $m->content;
                     ERROR("WEBHOOK - LOADING YAML FAILED!:" . Data::Dumper::Dumper($m->content));
@@ -789,6 +790,64 @@ sub before_send_messages {
 
     logaction('WEBHOOK_NOTIFICATIONS', 'DONE', undef, undef, 'cron') if $is_cronjob;
     logaction('WEBHOOK_NOTIFICATIONS', 'MESSAGES_PROCESSED', undef, encode_json($info), 'cron') if $is_cronjob;
+}
+
+=head3 _normalize_yaml_flat_id_list_blocks
+
+Some notice templates emit invalid YAML where comma-separated identifiers are
+placed on their own lines after an otherwise empty mapping value, e.g.:
+
+  webhook: yes
+  holds:
+  2,
+  1,
+
+C<YAML::XS::Load> rejects that. Collapse those runs into a single line
+C<holds: 2,1> so parsing and the rest of this plugin behave as for a
+one-line list. Optional blank lines between the key and the first id line are
+skipped. Only non-negative integer ids are recognized (same as typical Koha
+primary keys).
+
+Applied to every comma-separated id field this plugin reads from YAML.
+
+=cut
+
+sub _normalize_yaml_flat_id_list_blocks {
+    my ($text) = @_;
+    return $text unless defined $text && length $text;
+
+    my @KEYS = qw( holds hold checkouts checkout old_checkout old_hold );
+    my $key_re = join '|', map { quotemeta $_ } @KEYS;
+
+    my @lines = split /\R/, $text, -1;
+    my @out;
+    my $i = 0;
+    LINE:
+    while ( $i < @lines ) {
+        my $line = $lines[$i];
+        if ( $line =~ /^($key_re):\s*$/ ) {
+            my $key    = $1;
+            my $cursor = $i + 1;
+            while ( $cursor < @lines && $lines[$cursor] =~ /^\s*$/ ) {
+                $cursor++;
+            }
+            my @ids;
+            my $id_cursor = $cursor;
+            while ( $id_cursor < @lines && $lines[$id_cursor] =~ /^\s*(\d+)\s*,?\s*$/ ) {
+                push @ids, $1;
+                $id_cursor++;
+            }
+            if (@ids) {
+                push @out, "$key: " . join( ',', @ids );
+                $i = $id_cursor;
+                next LINE;
+            }
+        }
+        push @out, $line;
+        $i++;
+    }
+
+    return join "\n", @out;
 }
 
 =head3 build_minimal_payload
