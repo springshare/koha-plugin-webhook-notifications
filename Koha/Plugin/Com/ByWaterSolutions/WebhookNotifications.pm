@@ -330,6 +330,153 @@ sub send_to_webhook {
     };
 }
 
+=head3 load_yaml_documents_from_message_content
+
+Parses YAML from message C<content>. Koha digest notices wrap repeating blocks
+in lines of four or more dashes (C<---->); the full body is often not valid
+YAML as a single document, so when those delimiters are present we load each
+segment separately. Segments that are only comma-separated numeric ids (one
+or more lines) are collected and merged with the header mapping in
+C<merge_webhook_yaml_documents>. Multi-document YAML without digest delimiters
+is still supported. Message content is normalized first (see
+C<_normalize_yaml_flat_id_list_blocks>).
+
+=cut
+
+sub load_yaml_documents_from_message_content {
+    my ( $self, $content ) = @_;
+    my @docs;
+    my @orphans;
+    return ( \@docs, \@orphans ) unless defined $content && length $content;
+
+    $content = _normalize_yaml_flat_id_list_blocks($content);
+
+    if ( $content =~ /\R-{4,}\R/ ) {
+        for my $seg ( split( /\R-{4,}\R/, $content ) ) {
+            $seg =~ s/\A\s+|\s+\z//g;
+            next unless length $seg;
+            $seg = _normalize_yaml_flat_id_list_blocks($seg);
+            if ( _segment_is_plain_id_list_block($seg) ) {
+                push @orphans, $seg;
+                next;
+            }
+            eval {
+                my @loaded = Load($seg);
+                push @docs, grep { defined && ref $_ eq 'HASH' } @loaded;
+            };
+        }
+    }
+
+    if ( !@docs ) {
+        eval {
+            my @loaded = Load($content);
+            push @docs, grep { defined && ref $_ eq 'HASH' } @loaded;
+        };
+    }
+
+    return ( \@docs, \@orphans );
+}
+
+=head3 merge_webhook_yaml_documents
+
+When digest or multi-document YAML yields several mappings with C<webhook: yes>,
+merge them into one mapping so checkout/hold identifiers are combined and only
+one webhook POST is sent per message. Plain id-only digest segments (lines of
+comma-separated numbers) attach to C<checkouts> when any document declares a
+C<checkouts> key, or to C<holds> when any document declares C<holds> (even if
+the value is empty before digest rows are expanded).
+
+=cut
+
+sub merge_webhook_yaml_documents {
+    my ( $self, $docs, $orphans ) = @_;
+    $docs    = [] unless ref $docs    eq 'ARRAY';
+    $orphans = [] unless ref $orphans eq 'ARRAY';
+
+    my @wh = grep { ( $_->{webhook} // '' ) eq 'yes' } @$docs;
+    return undef unless @wh;
+
+    my $capture_checkouts = any { exists $_->{checkouts} } @wh;
+    my $capture_holds     = any { exists $_->{holds} } @wh;
+
+    my @orphan_ids;
+    for my $seg ( @$orphans ) {
+        push @orphan_ids, _split_trim_ids($seg);
+    }
+
+    return $wh[0] if @wh == 1 && !@orphan_ids;
+
+    my %m = ( webhook => 'yes' );
+    my ( @c_ids, @h_ids, @oc_ids, @oh_ids );
+
+    if (@orphan_ids) {
+        if ($capture_checkouts) {
+            push @c_ids, @orphan_ids;
+        }
+        elsif ($capture_holds) {
+            push @h_ids, @orphan_ids;
+        }
+    }
+
+    for my $y (@wh) {
+        push @c_ids,  _split_trim_ids( $y->{checkouts} )    if $y->{checkouts};
+        push @c_ids,  _split_trim_ids( $y->{checkout} )      if $y->{checkout};
+        push @h_ids,  _split_trim_ids( $y->{holds} )        if $y->{holds};
+        push @h_ids,  _split_trim_ids( $y->{hold} )         if $y->{hold};
+        push @oc_ids, _split_trim_ids( $y->{old_checkout} ) if $y->{old_checkout};
+        push @oh_ids, _split_trim_ids( $y->{old_hold} )     if $y->{old_hold};
+
+        $m{patron}     //= $y->{patron};
+        $m{library}    //= $y->{library};
+        $m{item}       //= $y->{item};
+        $m{biblio}     //= $y->{biblio};
+        $m{biblioitem} //= $y->{biblioitem};
+    }
+
+    @c_ids  = _uniq_preserving_order(@c_ids);
+    @h_ids  = _uniq_preserving_order(@h_ids);
+    @oc_ids = _uniq_preserving_order(@oc_ids);
+    @oh_ids = _uniq_preserving_order(@oh_ids);
+
+    $m{checkouts}    = join( ',', @c_ids )  if @c_ids;
+    $m{holds}        = join( ',', @h_ids )  if @h_ids;
+    $m{old_checkout} = join( ',', @oc_ids ) if @oc_ids;
+    $m{old_hold}     = join( ',', @oh_ids ) if @oh_ids;
+
+    return \%m;
+}
+
+sub _segment_is_plain_id_list_block {
+    my ($seg) = @_;
+    return 0 unless defined $seg && $seg =~ /\S/;
+    for my $line ( split /\R/, $seg ) {
+        next unless $line =~ /\S/;
+        return 0 unless _line_is_digit_csv($line);
+    }
+    return 1;
+}
+
+sub _line_is_digit_csv {
+    my ($line) = @_;
+    $line =~ s/\A\s+|\s+\z//g;
+    return 0 unless length $line;
+    for my $field ( split /\s*,\s*/, $line ) {
+        return 0 unless $field =~ /^\d+$/;
+    }
+    return 1;
+}
+
+sub _split_trim_ids {
+    my ($s) = @_;
+    return () unless defined $s && length $s;
+    return map { s/\A\s+|\s+\z//gr } grep { length } split /,/, $s;
+}
+
+sub _uniq_preserving_order {
+    my %seen;
+    return grep { !$seen{$_}++ } @_;
+}
+
 =head3 before_send_messages
 
 Plugin hook that runs right before the message queue is processed
@@ -491,27 +638,18 @@ sub before_send_messages {
                 INFO("WORKING ON MESSAGE " . $m->id);
                 $is_cronjob && say "WEBHOOK - CONTENT:\n" . $m->content if $verbose > 2;
                 TRACE("MESSAGE CONTENTS: " . Data::Dumper::Dumper($m->unblessed));
-                my $content   = $m->content();
-                my $yaml_text = _normalize_yaml_flat_id_list_blocks($content);
+                my $content = $m->content();
+                my ( $docs, $orphans ) = $self->load_yaml_documents_from_message_content($content);
+                my $yaml    = $self->merge_webhook_yaml_documents( $docs, $orphans );
+
+                unless ($yaml) {
+                    INFO("MESSAGE ${\($m->id)} skipped - no webhook: yes YAML in content");
+                    next;
+                }
 
                 my $patron;
 
-                my @yaml;
                 try {
-                    @yaml = Load $yaml_text;
-                } catch {
-                    $is_cronjob && say "WEBHOOK - LOADING YAML FAILED!:\n" . $m->content;
-                    ERROR("WEBHOOK - LOADING YAML FAILED!:" . Data::Dumper::Dumper($m->content));
-                    @yaml = undef;
-                };
-
-                foreach my $yaml (@yaml) {
-                    try {
-
-                        next unless $yaml;
-                        next unless ref $yaml eq 'HASH';
-                        next unless $yaml->{webhook};
-                        next unless $yaml->{webhook} eq 'yes';
 
                         $messages_seen->{$m->message_id} = 1;
 
@@ -552,7 +690,7 @@ sub before_send_messages {
 
                         ## Handle 'checkouts'
                         if ($yaml->{checkouts}) {
-                            my @checkouts = split(/,/, $yaml->{checkouts});
+                            my @checkouts = _split_trim_ids( $yaml->{checkouts} );
 
                             foreach my $id (@checkouts) {
                                 my $checkout = Koha::Checkouts->find($id);
@@ -633,7 +771,7 @@ sub before_send_messages {
 
                         ## Handle 'holds'
                         if ($yaml->{holds}) {
-                            my @holds = split(/,/, $yaml->{holds});
+                            my @holds = _split_trim_ids( $yaml->{holds} );
 
                             foreach my $id (@holds) {
                                 my $hold = Koha::Holds->find($id);
@@ -757,7 +895,6 @@ sub before_send_messages {
                         $info->{results}->{sent}->{failed}++;
                         $results->{failed}++;
                     };
-                }
             } catch {
                 $is_cronjob && say "WEBHOOK - ERROR - Processing Message ${\( $m->id )} Failed - $_";
                 ERROR("Processing Message ${\( $m->id )} Failed - $_");
@@ -809,6 +946,8 @@ skipped. Only non-negative integer ids are recognized (same as typical Koha
 primary keys).
 
 Applied to every comma-separated id field this plugin reads from YAML.
+Called from L</load_yaml_documents_from_message_content> on the full message
+and again on each digest segment after C<----> splitting.
 
 =cut
 
