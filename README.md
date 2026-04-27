@@ -101,6 +101,17 @@ To send a message via webhook instead of having Koha process and send the notice
 | `holds` | Comma-delimited list of reserves.reserve_id |
 | `old_hold` | old_reserves.reserve_id (for cancelled holds) |
 
+### Digest notices (`*_DGST` letter codes)
+
+Koha digest notices repeat a template fragment for each checkout or hold, separated by a line of **four or more dashes** (`----`). The full message body is usually **not** valid YAML if you try to load it as a single document.
+
+This plugin splits the body on those dash lines, loads each segment, and merges every segment that contains `webhook: yes` into **one** webhook request. Segments that contain only comma-separated **numeric** ids (for example one `[% hold.id %],` or `[% checkout.issue_id %],` per digest row) are merged into the `holds` or `checkouts` list inferred from the header:
+
+- If the header YAML includes a **`holds:`** key (even with no value on the same line), digest id-only rows are treated as hold ids (`HOLDDGST`, etc.).
+- If the header includes **`checkouts:`**, digest id-only rows are treated as checkout ids (`PREDUEDGST`, `DUEDGST`, `AUTO_RENEWALS_DGST`, etc.).
+
+You can also put all hold or checkout ids on their own lines **immediately after** `holds:` or `checkouts:` **without** `----` between the key and the first id; that is invalid YAML for Koha’s parser but is normalized before load (same rules: numeric ids only).
+
 ### Example Notice Templates
 
 **CHECKOUT:**
@@ -139,13 +150,27 @@ hold: [% hold.id %]
 ---
 ```
 
-**HOLDDGST:**
+**HOLDDGST** (digest: one hold id per `----` block; header must include `holds:` so id rows attach to holds):
+
 ```yaml
 ---
 webhook: yes
-hold: [% hold.id %]
+holds: 
+----
+[% hold.id %],
+----
+```
+
+Equivalent on one line (no digest delimiters in the rendered body):
+
+```yaml
+---
+webhook: yes
+holds: [% FOREACH h IN holds %][% h.id %],[% END %]
 ---
 ```
+
+If each digest row is a full YAML mapping with `hold: [% hold.id %]` (and `webhook: yes`), you do not need `holds:` in the header; the plugin merges every `hold` id across segments.
 
 **HOLD_REMINDER:**
 ```yaml
@@ -184,7 +209,20 @@ checkout: [% checkout.issue_id %]
 ---
 ```
 
-**PREDUEDGST:**
+**PREDUEDGST** (digest: one checkout id per `----` block; header must include `checkouts:` so id rows attach to checkouts):
+
+```yaml
+---
+webhook: yes
+patron: [% borrower.id %]
+checkouts: 
+----
+[% checkout.issue_id %],
+----
+```
+
+One-line alternative:
+
 ```yaml
 ---
 webhook: yes
@@ -201,7 +239,19 @@ checkout: [% checkout.issue_id %]
 ---
 ```
 
-**DUEDGST:**
+**DUEDGST** (digest; same pattern as **PREDUEDGST** — declare `checkouts:` in the header, then one id line per digest row):
+
+```yaml
+---
+webhook: yes
+checkouts: 
+----
+[% checkout.issue_id %],
+----
+```
+
+One-line alternative:
+
 ```yaml
 ---
 webhook: yes
@@ -217,7 +267,19 @@ checkout: [% checkout.id %]
 ---
 ```
 
-**AUTO_RENEWALS_DGST:**
+**AUTO_RENEWALS_DGST** (digest; same `checkouts:` + per-row `----` pattern as **PREDUEDGST** / **DUEDGST**):
+
+```yaml
+---
+webhook: yes
+checkouts: 
+----
+[% checkout.issue_id %],
+----
+```
+
+One-line alternative:
+
 ```yaml
 ---
 webhook: yes
