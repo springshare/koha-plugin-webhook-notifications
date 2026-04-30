@@ -105,7 +105,10 @@ To send a message via webhook instead of having Koha process and send the notice
 
 Two different shapes show up in Koha letter content, and the plugin handles both.
 
-**Built incrementally (one event at a time):** `CHECKOUT`, `RENEWAL`, `CHECKIN`, `HOLDDGST`. Koha renders the template once per transaction and concatenates the rendered fragments into the message body, separating them with a line of **four or more dashes** (`----`). The body is usually **not** valid YAML as a single document. Write these templates as a single-event mapping (e.g. `checkout: [% checkout.issue_id %]` or `hold: [% hold.id %]`); the plugin splits the body on `----`, loads each segment, and merges every `webhook: yes` segment into **one** webhook request, combining `checkout`/`hold` ids into a single `checkouts`/`holds` list.
+**Built incrementally (one event at a time):** `CHECKOUT`, `RENEWAL`, `CHECKIN`, `HOLDDGST`. Koha renders the template once per transaction and concatenates the rendered fragments into the message body, separating them with a line of **four or more dashes** (`----`). The body is usually **not** valid YAML as a single document. The plugin splits the body on `----`, loads each segment, and merges every `webhook: yes` segment into **one** webhook request. Two template shapes are supported:
+
+- **Empty plural header + per-event id row.** Declare `holds:` or `checkouts:` (with no value) in the header, and emit a single id per event in the digest body (e.g. `[% hold.id %],` or `[% checkout.id %],`). Bare numeric-id segments are attached to the `holds` / `checkouts` list inferred from the header.
+- **Single-event mapping per render.** Write the template as a one-event mapping (e.g. `hold: [% hold.id %]` or `checkout: [% checkout.id %]`); each batched segment loads as its own valid YAML mapping and the plugin merges the singular `hold` / `checkout` ids across segments.
 
 **Built all at once:** `PREDUEDGST`, `DUEDGST`, `AUTO_RENEWALS_DGST`. The full digest body is rendered in a single pass with the full collection in scope, so use a `FOREACH` loop in the template to emit one comma-separated list (e.g. `checkouts: [% FOREACH c IN checkouts %][% c.issue_id %],[% END %]`). The body is valid YAML; no `----` splitting is involved.
 
