@@ -175,15 +175,6 @@ holds:
 ---
 ```
 
-Equivalent on one line (no digest delimiters in the rendered body):
-
-```yaml
----
-webhook: yes
-holds: [% FOREACH h IN holds %][% h.id %],[% END %]
----
-```
-
 If each digest row is a full YAML mapping with `hold: [% hold.id %]` (and `webhook: yes`), you do not need `holds:` in the header; the plugin merges every `hold` id across segments.
 
 **HOLD_REMINDER:**
