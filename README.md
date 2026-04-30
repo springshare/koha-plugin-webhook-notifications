@@ -167,6 +167,7 @@ holds:
 ----
 [% hold.id %],
 ----
+---
 ```
 
 Equivalent on one line (no digest delimiters in the rendered body):
