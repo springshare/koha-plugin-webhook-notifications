@@ -126,6 +126,7 @@ checkouts:
 ----
 [% checkout.id %],
 ----
+---
 ```
 
 If each batched event renders as a full YAML mapping with `checkout: [% checkout.id %]` (and `webhook: yes`), you do not need `checkouts:` in the header; the plugin merges every `checkout` id across segments.
@@ -140,6 +141,7 @@ checkouts:
 ----
 [% checkout.id %],
 ----
+---
 ```
 
 **CHECKIN** (built incrementally; write a single-event mapping — Koha appends one rendered fragment per checkin separated by `----`, and the plugin merges each segment's `old_checkout` id into the request):
