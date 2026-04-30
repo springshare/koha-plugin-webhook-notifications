@@ -101,38 +101,46 @@ To send a message via webhook instead of having Koha process and send the notice
 | `holds` | Comma-delimited list of reserves.reserve_id |
 | `old_hold` | old_reserves.reserve_id (for cancelled holds) |
 
-### Digest notices (`*_DGST` letter codes)
+### Notices that Koha builds incrementally vs. all at once
 
-Koha digest notices repeat a template fragment for each checkout or hold, separated by a line of **four or more dashes** (`----`). The full message body is usually **not** valid YAML if you try to load it as a single document.
+Two different shapes show up in Koha letter content, and the plugin handles both.
 
-This plugin splits the body on those dash lines, loads each segment, and merges every segment that contains `webhook: yes` into **one** webhook request. Segments that contain only comma-separated **numeric** ids (for example one `[% hold.id %],` or `[% checkout.issue_id %],` per digest row) are merged into the `holds` or `checkouts` list inferred from the header:
+**Built incrementally (one event at a time):** `CHECKOUT`, `RENEWAL`, `CHECKIN`, `HOLDDGST`. Koha renders the template once per transaction and concatenates the rendered fragments into the message body, separating them with a line of **four or more dashes** (`----`). The body is usually **not** valid YAML as a single document. Write these templates as a single-event mapping (e.g. `checkout: [% checkout.issue_id %]` or `hold: [% hold.id %]`); the plugin splits the body on `----`, loads each segment, and merges every `webhook: yes` segment into **one** webhook request, combining `checkout`/`hold` ids into a single `checkouts`/`holds` list.
 
-- If the header YAML includes a **`holds:`** key (even with no value on the same line), digest id-only rows are treated as hold ids (`HOLDDGST`, etc.).
-- If the header includes **`checkouts:`**, digest id-only rows are treated as checkout ids (`PREDUEDGST`, `DUEDGST`, `AUTO_RENEWALS_DGST`, etc.).
+**Built all at once:** `PREDUEDGST`, `DUEDGST`, `AUTO_RENEWALS_DGST`. The full digest body is rendered in a single pass with the full collection in scope, so use a `FOREACH` loop in the template to emit one comma-separated list (e.g. `checkouts: [% FOREACH c IN checkouts %][% c.issue_id %],[% END %]`). The body is valid YAML; no `----` splitting is involved.
 
-You can also put all hold or checkout ids on their own lines **immediately after** `holds:` or `checkouts:` **without** `----` between the key and the first id; that is invalid YAML for Koha’s parser but is normalized before load (same rules: numeric ids only).
+As a tolerance, the plugin also normalizes the invalid-YAML shape where a key like `holds:` or `checkouts:` is followed by bare numeric-id lines (one id per line, optional trailing comma) before the first `----` — those id lines are folded into the preceding key.
 
 ### Example Notice Templates
 
-**CHECKOUT:**
+**CHECKOUT** (built incrementally: header declares `checkouts:` so id rows attach to checkouts; one id per `----` block):
+
 ```yaml
 ---
 webhook: yes
-checkout: [% checkout.id %]
 library: [% branch.id %]
----
+checkouts: 
+----
+[% checkout.id %],
+----
 ```
 
-**RENEWAL:**
+If each batched event renders as a full YAML mapping with `checkout: [% checkout.id %]` (and `webhook: yes`), you do not need `checkouts:` in the header; the plugin merges every `checkout` id across segments.
+
+**RENEWAL** (same shape as **CHECKOUT** — Koha appends one rendered fragment per renewal separated by `----`):
+
 ```yaml
 ---
 webhook: yes
-checkout: [% checkout.id %]
 library: [% branch.id %]
----
+checkouts: 
+----
+[% checkout.id %],
+----
 ```
 
-**CHECKIN:**
+**CHECKIN** (built incrementally; write a single-event mapping — Koha appends one rendered fragment per checkin separated by `----`, and the plugin merges each segment's `old_checkout` id into the request):
+
 ```yaml
 ---
 webhook: yes
@@ -209,19 +217,7 @@ checkout: [% checkout.issue_id %]
 ---
 ```
 
-**PREDUEDGST** (digest: one checkout id per `----` block; header must include `checkouts:` so id rows attach to checkouts):
-
-```yaml
----
-webhook: yes
-patron: [% borrower.id %]
-checkouts: 
-----
-[% checkout.issue_id %],
-----
-```
-
-One-line alternative:
+**PREDUEDGST** (built all at once — use a `FOREACH` loop to emit a single comma-separated list):
 
 ```yaml
 ---
@@ -239,18 +235,7 @@ checkout: [% checkout.issue_id %]
 ---
 ```
 
-**DUEDGST** (digest; same pattern as **PREDUEDGST** — declare `checkouts:` in the header, then one id line per digest row):
-
-```yaml
----
-webhook: yes
-checkouts: 
-----
-[% checkout.issue_id %],
-----
-```
-
-One-line alternative:
+**DUEDGST** (built all at once — `FOREACH` loop, same shape as **PREDUEDGST**):
 
 ```yaml
 ---
@@ -267,18 +252,7 @@ checkout: [% checkout.id %]
 ---
 ```
 
-**AUTO_RENEWALS_DGST** (digest; same `checkouts:` + per-row `----` pattern as **PREDUEDGST** / **DUEDGST**):
-
-```yaml
----
-webhook: yes
-checkouts: 
-----
-[% checkout.issue_id %],
-----
-```
-
-One-line alternative:
+**AUTO_RENEWALS_DGST** (built all at once — `FOREACH` loop, same shape as **PREDUEDGST** / **DUEDGST**):
 
 ```yaml
 ---
