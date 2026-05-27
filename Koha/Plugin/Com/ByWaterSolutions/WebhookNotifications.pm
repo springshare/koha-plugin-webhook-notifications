@@ -349,12 +349,14 @@ sub load_yaml_documents_from_message_content {
     my @orphans;
     return ( \@docs, \@orphans ) unless defined $content && length $content;
 
+    $content = _strip_pound_comments_and_continuations($content);
     $content = _normalize_yaml_flat_id_list_blocks($content);
 
     if ( $content =~ /\R-{4,}\R/ ) {
         for my $seg ( split( /\R-{4,}\R/, $content ) ) {
             $seg =~ s/\A\s+|\s+\z//g;
             next unless length $seg;
+            $seg = _strip_pound_comments_and_continuations($seg);
             $seg = _normalize_yaml_flat_id_list_blocks($seg);
             if ( _segment_is_plain_id_list_block($seg) ) {
                 push @orphans, $seg;
@@ -927,6 +929,90 @@ sub before_send_messages {
 
     logaction('WEBHOOK_NOTIFICATIONS', 'DONE', undef, undef, 'cron') if $is_cronjob;
     logaction('WEBHOOK_NOTIFICATIONS', 'MESSAGES_PROCESSED', undef, encode_json($info), 'cron') if $is_cronjob;
+}
+
+=head3 _strip_pound_comments_and_continuations
+
+Some notice templates emit invalid YAML where free-text annotations are added
+as C<#>-prefixed lines that wrap to subsequent un-prefixed continuation lines.
+MessageBee-style notices look like:
+
+  webhook: yes
+  holds:
+  #Title Small country houses: their repair and enlargement; forty examples
+  chosen from five centuries Weaver, Lawrence
+  1209903, #Title Fast like a girl: a woman's guide to using the healing power of
+  burn fat, boost energy, and balance hormones Pelz, Mindy
+  1209902,
+  #Title The naked gun DVD gift
+
+YAML's native C<#> handling only covers the first line of a wrapped comment;
+the un-prefixed continuation lines get parsed as data and break C<YAML::XS::Load>
+(typically because they reintroduce stray colons or unquoted text).
+
+This helper strips:
+
+=over
+
+=item * whole-line C<#> comments (optionally indented);
+
+=item * inline C<#> comments on id-list lines (e.g. C<1209903, #Title ...>);
+
+=item * any subsequent prose continuation lines, up to the next structural
+YAML line (blank line, digest delimiter C<---->, known plugin key like
+C<webhook:>, C<patron:>, C<holds:>, or a bare numeric id line).
+
+=back
+
+Run before L</_normalize_yaml_flat_id_list_blocks> so the flat-id normalizer
+sees clean input.
+
+=cut
+
+sub _strip_pound_comments_and_continuations {
+    my ($text) = @_;
+    return $text unless defined $text && length $text;
+
+    my @KEYS = qw(
+        webhook patron library item biblio biblioitem
+        holds hold checkouts checkout old_checkout old_hold
+    );
+    my $key_re = join '|', map { quotemeta $_ } @KEYS;
+
+    my @lines = split /\R/, $text, -1;
+    my @out;
+    my $in_comment_block = 0;
+
+    for my $line (@lines) {
+        my $is_structural =
+               $line =~ /^\s*$/
+            || $line =~ /^-{3,}\s*$/
+            || $line =~ /^\s*(?:$key_re)\s*:/
+            || $line =~ /^\s*\d+\s*,?\s*$/;
+
+        if ( $line =~ /^\s*#/ ) {
+            $in_comment_block = 1;
+            next;
+        }
+
+        if ( $line =~ /^(\s*\d+\s*,?)\s+#.*$/ ) {
+            push @out, $1;
+            $in_comment_block = 1;
+            next;
+        }
+
+        if ($in_comment_block) {
+            if ($is_structural) {
+                $in_comment_block = 0;
+                push @out, $line;
+            }
+            next;
+        }
+
+        push @out, $line;
+    }
+
+    return join "\n", @out;
 }
 
 =head3 _normalize_yaml_flat_id_list_blocks
