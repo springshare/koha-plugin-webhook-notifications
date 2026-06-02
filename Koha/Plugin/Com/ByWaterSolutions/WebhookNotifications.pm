@@ -6,6 +6,7 @@ use base qw(Koha::Plugins::Base);
 
 use C4::Context;
 use C4::Log qw(logaction);
+use Koha::AuthorisedValues;
 use Koha::DateUtils qw(dt_from_string);
 
 use Data::Dumper;
@@ -478,6 +479,16 @@ sub _uniq_preserving_order {
     return grep { !$seen{$_}++ } @_;
 }
 
+sub _cancellation_reason_label {
+    my ($code) = @_;
+    return undef unless defined $code && length $code;
+    my $av = Koha::AuthorisedValues->search({
+        category         => 'HOLD_CANCELLATION',
+        authorised_value => $code,
+    })->next;
+    return $av ? $av->lib : $code;
+}
+
 =head3 before_send_messages
 
 Plugin hook that runs right before the message queue is processed
@@ -730,6 +741,8 @@ sub before_send_messages {
 
                             my $subdata;
                             $subdata->{hold}           = $hold->unblessed;
+                            $subdata->{hold}->{cancellation_reason_description}
+                                = _cancellation_reason_label($hold->cancellation_reason);
                             $subdata->{pickup_library} = $hold->branch->unblessed;
                             $subdata->{biblio}         = $self->scrub_biblio($biblio->unblessed);
                             $subdata->{biblioitem}     = $biblioitem->unblessed;
@@ -756,8 +769,12 @@ sub before_send_messages {
                             $patron //= $hold->patron;
                             $data->{patron} //= $self->scrub_patron($patron->unblessed);
 
+                            my $hold_data = $hold->unblessed;
+                            $hold_data->{cancellation_reason_description}
+                                = _cancellation_reason_label($hold->cancellation_reason);
+
                             my $subdata;
-                            $subdata->{holds}          = [$hold->unblessed];
+                            $subdata->{holds}          = [$hold_data];
                             $subdata->{pickup_library} = Koha::Libraries->find($hold->branchcode);
                             $subdata->{biblio}         = $self->scrub_biblio($biblio->unblessed);
                             $subdata->{biblioitem}     = $biblioitem->unblessed;
@@ -784,6 +801,8 @@ sub before_send_messages {
                                 my $subdata;
                                 my $item = $hold->item;
                                 $subdata->{hold}           = $hold->unblessed;
+                                $subdata->{hold}->{cancellation_reason_description}
+                                    = _cancellation_reason_label($hold->cancellation_reason);
                                 $subdata->{pickup_library} = $hold->branch->unblessed;
                                 if ($item) {
                                     $subdata->{item}       = $item->unblessed;
