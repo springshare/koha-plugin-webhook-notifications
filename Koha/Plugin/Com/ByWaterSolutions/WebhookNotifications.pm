@@ -356,7 +356,6 @@ sub load_yaml_documents_from_message_content {
         for my $seg ( split( /\R-{4,}\R/, $content ) ) {
             $seg =~ s/\A\s+|\s+\z//g;
             next unless length $seg;
-            $seg = _strip_pound_comments_and_continuations($seg);
             $seg = _normalize_yaml_flat_id_list_blocks($seg);
             if ( _segment_is_plain_id_list_block($seg) ) {
                 push @orphans, $seg;
