@@ -24,6 +24,11 @@ use YAML::XS qw(Load);
 our $VERSION         = "{VERSION}";
 our $MINIMUM_VERSION = "{MINIMUM_VERSION}";
 
+# Placeholder shown in the configure form's client_secret field. The real
+# secret is never sent to the browser; if this value comes back on save it
+# means the user did not retype the secret, so the stored value must be kept.
+our $MASKED_SECRET_PLACEHOLDER = '••••••••••••';
+
 our $metadata = {
     name            => 'Webhook Notifications',
     author          => 'Samuel Mahr',
@@ -76,7 +81,7 @@ sub configure {
             has_oauth_credentials             => $self->has_oauth_credentials(),
             auth_url                           => $self->get_display_auth_url(),
             client_id                          => $self->get_display_client_id(),
-            client_secret                      => '••••••••••••',
+            client_secret                      => $MASKED_SECRET_PLACEHOLDER,
             notice_url                         => $self->get_display_notice_url(),
             customer_id                        => $self->get_display_customer_id(),
         );
@@ -96,6 +101,16 @@ sub configure {
         my $client_secret = $cgi->param('client_secret');
         my $notice_url    = $cgi->param('notice_url');
         my $customer_id   = $cgi->param('customer_id');
+
+        # The configure form pre-fills the secret field with a masked
+        # placeholder, never the real secret. If the user saves without
+        # retyping it (e.g. while changing an unrelated setting), keep the
+        # stored secret instead of overwriting it with the placeholder.
+        my $stored_syspref = $self->get_decrypted_syspref('WebhookCredentials');
+        $client_secret     = _resolve_client_secret(
+            $client_secret,
+            $stored_syspref ? $stored_syspref->{client_secret} : undef,
+        );
 
         if ($auth_url && $client_id && $client_secret && $notice_url) {
             my $credentials = {
@@ -128,7 +143,7 @@ sub configure {
                         has_oauth_credentials             => $self->has_oauth_credentials(),
                         auth_url                           => $auth_url // '',
                         client_id                          => $client_id // '',
-                        client_secret                      => '••••••••••••',
+                        client_secret                      => $MASKED_SECRET_PLACEHOLDER,
                         notice_url                         => $notice_url // '',
                         customer_id                        => $customer_id // '',
                         error_message => 'All OAuth2 credential fields are required. Please provide auth_url, client_id, client_secret, and notice_url.',
@@ -141,6 +156,27 @@ sub configure {
 
         $self->go_home();
     }
+}
+
+=head3 _resolve_client_secret
+
+Given the client_secret submitted from the configure form and the secret
+currently stored, return the value that should be persisted. The form pre-fills
+the secret field with a masked placeholder rather than the real secret, so a
+submission equal to the placeholder (or empty/undef) means "unchanged" and the
+stored secret is kept. Any other value is a genuinely new secret.
+
+=cut
+
+sub _resolve_client_secret {
+    my ($submitted, $existing) = @_;
+
+    return $existing
+        if !defined $submitted
+        || $submitted eq ''
+        || $submitted eq $MASKED_SECRET_PLACEHOLDER;
+
+    return $submitted;
 }
 
 =head3 install

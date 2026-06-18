@@ -4,68 +4,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.1.1] - 2026-02-05
-### Performance
-- **PERFORMANCE**: Added global credential caching via `$oauth_credentials_cache`
-  - Eliminates redundant DB reads and decryption operations
-  - ~99% reduction in credential retrieval time (100-200ms → <1ms for 100 messages)
-  - Cache automatically invalidated when credentials are updated via admin UI
+## [1.0.6] - 2026-06-17
+### Fixed
+- **Client secret no longer clobbered on save.** The configure form pre-fills the
+  secret field with a masked placeholder (`••••••••••••`), never the real secret.
+  Saving the form while changing any unrelated setting (archive dir, payload
+  format, the skip-overdue toggle) submitted that placeholder back, and the save
+  path stored it verbatim — overwriting the real `client_secret` with the mask and
+  breaking OAuth2 authentication. Submissions equal to the placeholder (or empty)
+  are now treated as "unchanged" and the stored secret is preserved. A genuinely
+  retyped secret still replaces the old one.
 
+## [1.0.5] - 2026-06-02
 ### Added
-- New `invalidate_oauth_credentials_cache()` method for explicit cache invalidation
+- Cancellation reason description included in hold data sent to the webhook.
 
-## [4.1.0] - 2026-02-03
-### Security
-- **SECURITY**: OAuth2 credentials now stored as encrypted system preferences
-  - Credentials encrypted using AES-256 via Koha::Encryption module
-  - Client secret masked in admin interface
-  - Eliminates plain-text credential storage in configuration files
+### Fixed
+- Strip pound (`#`) comments and wrapped continuation lines from notice YAML before
+  parsing, so commented-out content no longer corrupts the payload.
 
+## [1.0.4] - 2026-05-01
+### Fixed
+- Correct formatting of checkout digest (DGST) notices.
+- README clarifications for notice types and digest shapes.
+
+## [1.0.3] - 2026-04-28
 ### Added
-- New `get_oauth_credentials()` method with fallback from system preference to koha-conf.xml
-- New `encrypt_credentials()` and `decrypt_credentials()` helper methods
-- New `migrate_credentials_from_koha_conf()` method for automatic credential migration
-- New credential display methods: `get_display_auth_url()`, `get_display_client_id()`, `get_display_notice_url()`, `get_display_customer_id()`
-- New `has_oauth_credentials()` method to check credential configuration status
-- New `set_encrypted_syspref()` method for storing encrypted credentials
+- YAML parsing and merging for digest notices (`HOLDDGST`, `PREDUEDGST`, `DUEDGST`,
+  `AUTO_RENEWALS_DGST`), with documented YAML structure and hold/checkout merging.
 
+### Fixed
+- Handle newline breaks in digest notices that previously broke parsing.
+
+## [1.0.2] - 2026-02-20
+### Fixed
+- Do not attempt to decrypt credentials when none are configured.
+- Do not re-decode an already-unmarshalled credentials syspref (decryption bug).
+
+## [1.0.1] - 2026-01
+### Added
+- OAuth2 credential configuration form in the plugin settings.
+- Secure, encrypted credential storage via `Koha::Encryption` (AES-256) as an
+  encrypted system preference, replacing plain-text storage in koha-conf.xml.
+- Automatic migration of credentials from koha-conf.xml on install/upgrade.
+
+## [1.0.0] - 2025-12-03
 ### Changed
-- Updated `configure()` to support encrypted credential input form
-- Updated `get_oauth_token()` to use new credential retrieval methods
-- Updated `send_to_webhook()` to use new credential retrieval methods
-- Updated `install()` to automatically migrate credentials from koha-conf.xml
-- Updated `upgrade()` to support credential migration on plugin upgrades
-- Updated documentation to reflect new credential storage approach
-
-### Compatibility
-- Maintains full backward compatibility with existing koha-conf.xml configuration
-- Automatic migration ensures smooth transition to encrypted system preferences
-- Both configuration methods (system preference and koha-conf.xml) can coexist
-
-## [4.0.0] - 2024-12-03
-### Changed
-- **BREAKING**: Renamed plugin from MessageBee to WebhookNotifications
-- **BREAKING**: Replaced SFTP upload with HTTP webhook (OAuth2 + REST API)
-- **BREAKING**: Changed YAML trigger from `messagebee: yes` to `webhook: yes`
-- **BREAKING**: Renamed all environment variables from `MESSAGEBEE_*` to `WEBHOOK_*`
-- Renamed API namespace from `/messagebee/` to `/webhook_notifications/`
+- **BREAKING**: Restructured the MessageBee plugin into a generic
+  WebhookNotifications plugin — replaced SFTP upload with an OAuth2 + HTTP webhook
+  (REST) transport, changed the YAML trigger to `webhook: yes`, and renamed the
+  API namespace to `/webhook_notifications/`.
 
 ### Added
-- OAuth2 client credentials authentication flow
-- Configurable payload format (full enriched data or minimal IDs only)
-- Support for optional `customer-id` header via `WEBHOOK_CUSTOMER_ID` env var
-
-### Removed
-- SFTP upload functionality (replaced with HTTP POST)
-- `Net::SFTP::Foreign` dependency
-
-## [3.1.0] - 2022-05-19
-- Add patron/account_balance to the JSON data
-- Wrap most logic in try/catch to keep crashes from allowing messagebee yaml to be emailed by Koha
-
-## [3.0.0] - 2022-05-19
-- Update JSON data structure
-
-## [0.0.1] - 2021-06-30
-### Added
-- Initial commit!
+- Configurable payload format (full enriched data or minimal IDs only).
+- Optional `customer-id` header support.
