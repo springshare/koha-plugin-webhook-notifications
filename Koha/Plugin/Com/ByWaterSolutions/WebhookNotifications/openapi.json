@@ -2,7 +2,7 @@
   "/message/{message_id}/status":{
     "post":{
       "x-mojo-to":"Com::ByWaterSolutions::WebhookNotifications::API#update_message_status",
-      "operationId":"updateMessageStatus",
+      "operationId":"WebHookUpdateMessageStatus",
       "tags":[
         "messages"
       ],
@@ -72,7 +72,7 @@
   "/message/{message_id}/content":{
     "post":{
       "x-mojo-to":"Com::ByWaterSolutions::WebhookNotifications::API#update_message_content",
-      "operationId":"updateMessageContent",
+      "operationId":"WebHookUpdateMessageContent",
       "tags":[
         "messages"
       ],
