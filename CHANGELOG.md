@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Payloads over 3MB are gzip-compressed and sent as `application/octet-stream`, so
   the webhook doesn't send enormous payloads. Smaller payloads are
-  unchanged (plain JSON). Needs the matching `ppregisterfilenotices` update (BAUL3-1789).
+  unchanged (plain JSON).
 
 ## [1.0.7] - 2026-06-23
 ### Fixed
