@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.8] - 2026-07-13
+### Added
+- Payloads over 3MB are gzip-compressed and sent as `application/octet-stream`, so
+  the webhook doesn't send enormous payloads. Smaller payloads are
+  unchanged (plain JSON). Needs the matching `ppregisterfilenotices` update (BAUL3-1789).
+
+## [1.0.7] - 2026-06-23
+### Fixed
+- Prefixed plugin API `operationId`s (`WebHookUpdateMessageStatus`,
+  `WebHookUpdateMessageContent`) to avoid collisions with other plugins/core
+  routes sharing the generic `updateMessageStatus` / `updateMessageContent` names.
+
 ## [1.0.6] - 2026-06-17
 ### Fixed
 - **Client secret no longer clobbered on save.** The configure form pre-fills the
