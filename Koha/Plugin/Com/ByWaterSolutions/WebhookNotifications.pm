@@ -16,6 +16,7 @@ use File::Temp qw(tempdir);
 use List::Util qw(any);
 use Log::Log4perl qw(:easy);
 use LWP::UserAgent;
+use IO::Compress::Gzip qw(gzip $GzipError);
 use Mojo::JSON qw(encode_json decode_json);
 use POSIX;
 use Try::Tiny;
@@ -343,20 +344,31 @@ sub send_to_webhook {
 
     my $ua = LWP::UserAgent->new(timeout => 60);
 
-    my @headers = (
-        'Content-Type'  => 'application/json',
-        'Authorization' => "Bearer $token",
-    );
+    my $json      = encode_json($payload);
+    my $threshold = 3 * 1024 * 1024;    # 3MB, half the 6MB Lambda event limit
 
-    # Only add customer-id header if configured
+    my @headers = ( 'Authorization' => "Bearer $token" );
     if ($customer_id) {
         push @headers, 'customer-id' => $customer_id;
+    }
+
+    my $body;
+    if ( length($json) > $threshold ) {    # encode_json returns UTF-8 bytes
+        # gzip and send raw bytes; API Gateway base64s binary content-types
+        gzip( \$json => \my $gz ) or die "gzip failed: $GzipError";
+        push @headers, 'Content-Type' => 'application/octet-stream';
+        push @headers, 'Content-Encoding' => 'gzip';
+        $body = $gz;
+    }
+    else {
+        push @headers, 'Content-Type' => 'application/json';
+        $body = $json;
     }
 
     my $response = $ua->post(
         $notice_url,
         @headers,
-        Content => encode_json($payload),
+        Content => $body,
     );
 
     return {
