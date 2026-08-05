@@ -107,12 +107,12 @@ Two different shapes show up in Koha letter content, and the plugin handles both
 
 **Built incrementally (one event at a time):** `CHECKOUT`, `RENEWAL`, `CHECKIN`, `HOLDDGST`. Koha renders the template once per transaction and concatenates the rendered fragments into the message body, separating them with a line of **four or more dashes** (`----`). The body is usually **not** valid YAML as a single document. The plugin splits the body on `----`, loads each segment, and merges every `webhook: yes` segment into **one** webhook request. Two template shapes are supported:
 
-- **Empty plural header + per-event id row.** Declare `holds:` or `checkouts:` (with no value) in the header, and emit a single id per event in the digest body (e.g. `[% hold.id %],` or `[% checkout.id %],`). Bare numeric-id segments are attached to the `holds` / `checkouts` list inferred from the header. This shape is only valid for `holds` / `checkouts` — notices keyed on `old_checkout` / `old_hold` (e.g. CHECKIN, HOLD_CANCELLATION) must use the single-event mapping shape below, since orphan-id segments are not routed to `old_*` keys.
-- **Single-event mapping per render.** Write the template as a one-event mapping (e.g. `hold: [% hold.id %]`, `checkout: [% checkout.id %]`, or `old_checkout: [% old_checkout.issue_id %]`); each batched segment loads as its own valid YAML mapping and the plugin merges the singular ids across segments.
+- **Empty plural header + per-event id row.** Declare `holds:`, `checkouts:` or `old_checkouts:` (with no value) in the header, and emit a single id per event in the digest body (e.g. `[% hold.id %],`, `[% checkout.id %],` or `[% old_checkout.issue_id %],`). Bare numeric-id segments are attached to the list named by the header. **This is the preferred shape**, because it batches correctly when one Koha message covers several items. `old_hold` (HOLD_CANCELLATION) has no plural form and must use the mapping shape below.
+- **Single-event mapping per render.** Write the template as a one-event mapping (e.g. `hold: [% hold.id %]`, `checkout: [% checkout.id %]`, or `old_checkout: [% old_checkout.issue_id %]`); each batched segment loads as its own valid YAML mapping and the plugin merges the singular ids across segments. Still supported, so existing templates keep working.
 
 **Built all at once:** `PREDUEDGST`, `DUEDGST`, `AUTO_RENEWALS_DGST`. The full digest body is rendered in a single pass with the full collection in scope, so use a `FOREACH` loop in the template to emit one comma-separated list (e.g. `checkouts: [% FOREACH c IN checkouts %][% c.issue_id %],[% END %]`). The body is valid YAML; no `----` splitting is involved.
 
-As a tolerance, the plugin also normalizes the invalid-YAML shape where a key like `holds:` or `checkouts:` is followed by bare numeric-id lines (one id per line, optional trailing comma) before the first `----` — those id lines are folded into the preceding key.
+As a tolerance, the plugin also normalizes the invalid-YAML shape where a key like `holds:`, `checkouts:` or `old_checkouts:` is followed by bare numeric-id lines (one id per line, optional trailing comma) before the first `----` — those id lines are folded into the preceding key.
 
 ### Example Notice Templates
 
@@ -144,7 +144,22 @@ checkouts:
 ---
 ```
 
-**CHECKIN** (built incrementally; write a single-event mapping — Koha appends one rendered fragment per checkin separated by `----`, and the plugin merges each segment's `old_checkout` id into the request):
+**CHECKIN** (built incrementally: header declares `old_checkouts:` so id rows attach to old checkouts; one id per `----` block):
+
+```yaml
+---
+webhook: yes
+library: [% branch.id %]
+old_checkouts: 
+----
+[% old_checkout.issue_id %],
+----
+---
+```
+
+Note `old_checkout.issue_id` rather than `checkout.id` — a returned item has moved to `old_issues`, and the plugin resolves these ids via `Koha::Old::Checkouts`.
+
+The older single-event mapping shape still works and needs no urgent migration, but it is no longer recommended:
 
 ```yaml
 ---
