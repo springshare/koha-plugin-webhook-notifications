@@ -433,8 +433,10 @@ When digest or multi-document YAML yields several mappings with C<webhook: yes>,
 merge them into one mapping so checkout/hold identifiers are combined and only
 one webhook POST is sent per message. Plain id-only digest segments (lines of
 comma-separated numbers) attach to C<checkouts> when any document declares a
-C<checkouts> key, or to C<holds> when any document declares C<holds> (even if
-the value is empty before digest rows are expanded).
+C<checkouts> key, to C<holds> when any document declares C<holds>, or to
+C<old_checkouts> when any document declares C<old_checkouts> (even if the value
+is empty before digest rows are expanded). Merged old-checkout ids are emitted
+under the plural C<old_checkouts>; the singular C<old_checkout> is still read.
 
 =cut
 
@@ -446,8 +448,9 @@ sub merge_webhook_yaml_documents {
     my @wh = grep { ( $_->{webhook} // '' ) eq 'yes' } @$docs;
     return undef unless @wh;
 
-    my $capture_checkouts = any { exists $_->{checkouts} } @wh;
-    my $capture_holds     = any { exists $_->{holds} } @wh;
+    my $capture_checkouts     = any { exists $_->{checkouts} } @wh;
+    my $capture_holds         = any { exists $_->{holds} } @wh;
+    my $capture_old_checkouts = any { exists $_->{old_checkouts} } @wh;
 
     my @orphan_ids;
     for my $seg ( @$orphans ) {
@@ -466,15 +469,19 @@ sub merge_webhook_yaml_documents {
         elsif ($capture_holds) {
             push @h_ids, @orphan_ids;
         }
+        elsif ($capture_old_checkouts) {
+            push @oc_ids, @orphan_ids;
+        }
     }
 
     for my $y (@wh) {
-        push @c_ids,  _split_trim_ids( $y->{checkouts} )    if $y->{checkouts};
+        push @c_ids,  _split_trim_ids( $y->{checkouts} )     if $y->{checkouts};
         push @c_ids,  _split_trim_ids( $y->{checkout} )      if $y->{checkout};
-        push @h_ids,  _split_trim_ids( $y->{holds} )        if $y->{holds};
-        push @h_ids,  _split_trim_ids( $y->{hold} )         if $y->{hold};
-        push @oc_ids, _split_trim_ids( $y->{old_checkout} ) if $y->{old_checkout};
-        push @oh_ids, _split_trim_ids( $y->{old_hold} )     if $y->{old_hold};
+        push @h_ids,  _split_trim_ids( $y->{holds} )         if $y->{holds};
+        push @h_ids,  _split_trim_ids( $y->{hold} )          if $y->{hold};
+        push @oc_ids, _split_trim_ids( $y->{old_checkouts} ) if $y->{old_checkouts};
+        push @oc_ids, _split_trim_ids( $y->{old_checkout} )  if $y->{old_checkout};
+        push @oh_ids, _split_trim_ids( $y->{old_hold} )      if $y->{old_hold};
 
         $m{patron}     //= $y->{patron};
         $m{library}    //= $y->{library};
@@ -488,10 +495,10 @@ sub merge_webhook_yaml_documents {
     @oc_ids = _uniq_preserving_order(@oc_ids);
     @oh_ids = _uniq_preserving_order(@oh_ids);
 
-    $m{checkouts}    = join( ',', @c_ids )  if @c_ids;
-    $m{holds}        = join( ',', @h_ids )  if @h_ids;
-    $m{old_checkout} = join( ',', @oc_ids ) if @oc_ids;
-    $m{old_hold}     = join( ',', @oh_ids ) if @oh_ids;
+    $m{checkouts}     = join( ',', @c_ids )  if @c_ids;
+    $m{holds}         = join( ',', @h_ids )  if @h_ids;
+    $m{old_checkouts} = join( ',', @oc_ids ) if @oc_ids;
+    $m{old_hold}      = join( ',', @oh_ids ) if @oh_ids;
 
     return \%m;
 }
@@ -724,18 +731,26 @@ sub before_send_messages {
                             $is_cronjob && say "WEBHOOK - Fetching patron failed - $_";
                         };
 
-                        ## Handle 'checkout' / 'old_checkout'
-                        my $checkout;
+                        ## Handle 'checkout' / 'old_checkout' / 'old_checkouts'
+                        ## Any of them may hold a merged comma-separated id list.
+                        my @checkout_objects;
                         if ($yaml->{checkout}) {
-                            $checkout = Koha::Checkouts->find($yaml->{checkout});
+                            push @checkout_objects,
+                                grep { $_ }
+                                map  { Koha::Checkouts->find($_) }
+                                _split_trim_ids( $yaml->{checkout} );
                         }
-                        if ($yaml->{old_checkout}) {
-                            $checkout = Koha::Old::Checkouts->find($yaml->{old_checkout});
+                        for my $old_key (qw( old_checkout old_checkouts )) {
+                            next unless $yaml->{$old_key};
+                            push @checkout_objects,
+                                grep { $_ }
+                                map  { Koha::Old::Checkouts->find($_) }
+                                _split_trim_ids( $yaml->{$old_key} );
                         }
-                        if ($checkout) {
-                            $patron          //= $checkout->patron;
-                            $data->{patron}  = $self->scrub_patron($patron->unblessed);
-                            $data->{library} = $checkout->library->unblessed;
+                        foreach my $checkout (@checkout_objects) {
+                            $patron           //= $checkout->patron;
+                            $data->{patron}   = $self->scrub_patron($patron->unblessed);
+                            $data->{library} //= $checkout->library->unblessed;
 
                             my $subdata;
                             my $item = $checkout->item;
@@ -745,7 +760,8 @@ sub before_send_messages {
                             $subdata->{biblioitem} = $item->biblioitem->unblessed;
                             $subdata->{itemtype}   = $item->itemtype->unblessed;
 
-                            $data->{checkouts} = [$subdata];
+                            $data->{checkouts} //= [];
+                            push( @{$data->{checkouts}}, $subdata );
                         }
 
                         ## Handle 'checkouts'
@@ -1041,7 +1057,7 @@ sub _strip_pound_comments_and_continuations {
 
     my @KEYS = qw(
         webhook patron library item biblio biblioitem
-        holds hold checkouts checkout old_checkout old_hold
+        holds hold checkouts checkout old_checkout old_checkouts old_hold
     );
     my $key_re = join '|', map { quotemeta $_ } @KEYS;
 
@@ -1107,7 +1123,7 @@ sub _normalize_yaml_flat_id_list_blocks {
     my ($text) = @_;
     return $text unless defined $text && length $text;
 
-    my @KEYS = qw( holds hold checkouts checkout old_checkout old_hold );
+    my @KEYS = qw( holds hold checkouts checkout old_checkout old_checkouts old_hold );
     my $key_re = join '|', map { quotemeta $_ } @KEYS;
 
     my @lines = split /\R/, $text, -1;
